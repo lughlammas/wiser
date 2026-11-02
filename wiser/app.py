@@ -10,8 +10,17 @@ from pydantic import BaseModel
 
 from . import export, store
 from .ingest import ACCEPTED, IngestError, ingest, sections
-from .providers import LANG_CODES, ProviderUnavailable, chunk, get_provider, lang_code
+from .providers import ProviderError, ProviderUnavailable, chunk, get_provider, lang_code
 
+def _load_env():
+    f = Path(__file__).resolve().parent.parent / ".env"
+    if f.exists():
+        for l in f.read_text().splitlines():
+            if "=" in l and not l.lstrip().startswith("#"):
+                k, v = l.split("=", 1); os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_env()
 STATIC = Path(__file__).parent / "static"
 MAX_BYTES = 20 * 1024 * 1024
 LANGS = ["Português", "Inglês", "Espanhol", "Francês", "Alemão", "Italiano", "Holandês", "Russo", "Polonês",
@@ -131,7 +140,7 @@ def _run(pid):
     if not prov:
         p["job"] = {"state": "blocked", "status": st}; store.save(p); return
     todo = [b for b in p["blocks"] if b["id"] not in p["adaptation"]]
-    parts = chunk(todo)
+    parts = chunk(todo, int(os.environ.get("WISER_CHUNK_CHARS", "1500")))
     p["job"] = {"state": "running", "provider": st["label"], "done": 0, "total": len(parts), "started": time.time()}
     store.save(p)
     ctx = {"src": src, "tgt": tgt, "src_name": s["src"], "tgt_name": s["tgt"], "style": s["style"],
@@ -151,9 +160,9 @@ def _run(pid):
         p["job"] = {"state": "done", "provider": st["label"], "notes": note, "finished": time.time()}
         p["step"] = 4
         store.save(p)
-    except (ProviderUnavailable, OSError, ValueError, KeyError) as e:
+    except (ProviderError, ProviderUnavailable, OSError, ValueError, KeyError) as e:
         p = store.load(pid)
-        p["job"] = {"state": "error", "message": f"A adaptação parou: {e}. O que já foi feito está salvo; tente continuar."}
+        p["job"] = {"state": "error", "kind": getattr(e, "kind", "geracao"), "message": f"A adaptação parou: {e}. O que já foi feito está salvo; tente continuar."}
         store.save(p)
 
 

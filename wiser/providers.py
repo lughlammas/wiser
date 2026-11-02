@@ -10,7 +10,7 @@ Seleção: WISER_PROVIDER = auto | argos | openai | none (padrão auto).
 Chaves nunca são enviadas ao navegador.
 """
 from __future__ import annotations
-import json, os, re, urllib.request
+import json, os, re, urllib.error, urllib.request
 
 LANG_CODES = {"português": "pt", "portugues": "pt", "inglês": "en", "ingles": "en", "english": "en",
               "espanhol": "es", "francês": "fr", "frances": "fr", "alemão": "de", "alemao": "de",
@@ -33,8 +33,10 @@ class ProviderUnavailable(RuntimeError):
 SETUP_HELP = {
     "titulo": "Nenhum provedor de IA está configurado",
     "passos": [
-        "Opção gratuita e local (recomendada): no servidor, rode `.venv/bin/python -m wiser.setup_argos pt en` para instalar o par de idiomas (ex.: português → inglês). Depois reinicie o WISER.",
-        "Opção com modelo de linguagem (estilos completos): defina no servidor WISER_PROVIDER=openai, WISER_LLM_BASE_URL (ex.: http://127.0.0.1:11434/v1 para Ollama local), WISER_LLM_MODEL e, se o serviço exigir, WISER_LLM_API_KEY.",
+        "Escolha o provedor no arquivo .env do servidor: WISER_PROVIDER=ollama, gemini ou argos (veja .env.example) e reinicie o WISER.",
+        "Ollama (local, gratuito): instale o Ollama, rode `ollama serve` e `ollama pull qwen2.5:1.5b` (ou defina WISER_MODEL).",
+        "Gemini (nuvem): defina GEMINI_API_KEY (e, se quiser, WISER_MODEL). Na faixa gratuita o Google pode usar o conteúdo enviado.",
+        "Argos (local, gratuito, só tradução direta): `.venv/bin/python -m wiser.setup_argos pt en`.",
         "As chaves ficam só no servidor (variáveis de ambiente) e nunca aparecem no navegador.",
     ],
 }
@@ -55,6 +57,7 @@ class Provider:
 class ArgosProvider(Provider):
     name = "argos"
     label = "Argos Translate (local, gratuito)"
+    privacy = "Roda neste computador: o manuscrito não sai da máquina. Tradução direta, sem aplicar estilo."
 
     def _pair(self, src, tgt):
         try:
@@ -114,68 +117,155 @@ class ArgosProvider(Provider):
         return out
 
 
-class OpenAICompatProvider(Provider):
-    name = "openai"
+class ProviderError(RuntimeError):
+    """Erro com mensagem clara para o usuário (kind: chave|indisponivel|limite|geracao)."""
+    def __init__(self, kind, msg):
+        super().__init__(msg); self.kind = kind
+
+
+def _http_json(url, body, headers, timeout=300):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:300].decode("utf-8", "replace")
+        if e.code == 429:
+            raise ProviderError("limite", "Limite de uso do provedor atingido (429). Espere alguns minutos e clique em continuar; o que já foi feito está salvo.")
+        if e.code in (401, 403):
+            raise ProviderError("chave", f"O provedor recusou a chave de acesso ({e.code}). Confira a variável de ambiente no servidor.")
+        raise ProviderError("geracao", f"O provedor respondeu com erro {e.code}: {detail}")
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        raise ProviderError("indisponivel", f"Serviço de IA indisponível: {getattr(e, 'reason', e)}")
+
+
+STYLES = {"fiel": "Faithful to the original: follow sentence form and order closely.",
+          "natural": "Natural in the target language: keep meaning and authorial voice, with native fluency.",
+          "local": "Adapted to the local audience: adapt cultural references/units ONLY when needed, and flag every such adaptation."}
+SYSTEM = ("You adapt manuscripts into another language for an editorial team. Rules: translate every block completely; "
+          "do NOT add facts, sources, quotations or interpretations; keep proper names, bibliographic references, numbers, "
+          "list numbering and any token like ZQX0 exactly as given; obey the glossary. When an expression has no direct "
+          "equivalent or a passage is ambiguous, choose a rendering AND describe the choice in that block's flags (in Portuguese). "
+          "Reply ONLY with JSON: {\"items\":[{\"id\":\"...\",\"text\":\"...\",\"flags\":[\"...\"]}]} with the same ids, same order.")
+
+
+class LLMProvider(Provider):
     applies_style = True
 
-    def __init__(self):
-        self.base = os.environ.get("WISER_LLM_BASE_URL", "").rstrip("/")
-        self.model = os.environ.get("WISER_LLM_MODEL", "")
-        self.key = os.environ.get("WISER_LLM_API_KEY", "")
-        self.label = f"Modelo de linguagem ({self.model or 'não definido'})"
+    def _user(self, blocks, ctx):
+        return json.dumps({"from": ctx["src_name"], "to": ctx["tgt_name"], "style": STYLES.get(ctx.get("style"), STYLES["natural"]),
+                           "audience": ctx.get("audience") or None, "region": ctx.get("region") or None, "tone": ctx.get("tone") or None,
+                           "glossary": [{"term": g["source"], "render_as": g["source"] if g.get("keep") or not g.get("target") else g["target"]}
+                                        for g in ctx.get("glossary", [])],
+                           "blocks": [{"id": b["id"], "type": b["type"], "text": b["text"]} for b in blocks]}, ensure_ascii=False)
 
-    def available(self, src, tgt):
-        if not self.base or not self.model:
-            return False, "WISER_LLM_BASE_URL e WISER_LLM_MODEL não definidos."
-        return True, ""
-
-    def _prompt(self, blocks, ctx):
-        styles = {"fiel": "Fiel ao original: siga de perto a forma e a ordem das frases.",
-                  "natural": "Natural no idioma de destino: preserve o sentido e a voz, com fluência nativa.",
-                  "local": "Adaptado ao público local: adapte unidades e referências culturais SÓ quando necessário, e sinalize cada adaptação."}
-        sys = ("Você adapta manuscritos para outro idioma. Regras: não acrescente fatos, fontes, citações nem interpretações; "
-               "preserve nomes próprios, referências bibliográficas, URLs, escrita hebraica/árabe e números; preserve a numeração. "
-               "Quando uma expressão não tiver equivalente direto, ou o trecho for ambíguo, proponha uma solução E sinalize em flags. "
-               "Responda APENAS JSON: {\"items\":[{\"id\":...,\"text\":...,\"flags\":[\"...\"]}]} com os mesmos ids e ordem.")
-        user = {"de": ctx["src_name"], "para": ctx["tgt_name"], "estilo": styles.get(ctx.get("style"), styles["natural"]),
-                "publico": ctx.get("audience"), "regiao": ctx.get("region"), "tom": ctx.get("tone"),
-                "glossario": ctx.get("glossary", []), "manter_referencias": ctx.get("keep_references", True),
-                "blocos": [{"id": b["id"], "tipo": b["type"], "texto": b["text"]} for b in blocks]}
-        return sys, json.dumps(user, ensure_ascii=False)
+    def _complete(self, system, user) -> str:
+        raise NotImplementedError
 
     def translate_chunk(self, blocks, ctx):
-        sys, user = self._prompt(blocks, ctx)
-        body = json.dumps({"model": self.model, "temperature": 0.2,
-                           "messages": [{"role": "system", "content": sys}, {"role": "user", "content": user}]}).encode()
-        req = urllib.request.Request(self.base + "/chat/completions", data=body, headers={
-            "Content-Type": "application/json", **({"Authorization": "Bearer " + self.key} if self.key else {})})
-        with urllib.request.urlopen(req, timeout=300) as r:
-            content = json.load(r)["choices"][0]["message"]["content"]
-        m = re.search(r"\{.*\}", content, re.S)
-        items = json.loads(m.group(0))["items"] if m else []
-        byid = {i["id"]: i for i in items}
-        out = []
+        prot, work = [], []
         for b in blocks:
-            i = byid.get(b["id"])
-            if not i:
-                raise ProviderUnavailable(f"O modelo não devolveu o bloco {b['id']}; nada foi salvo para este trecho.")
-            out.append({"id": b["id"], "text": i["text"],
-                        "flags": [{"kind": "decisao", "msg": f} for f in i.get("flags", [])]})
+            toks = {}
+            def tok(m):
+                k = f"ZQX{len(toks)}"; toks[k] = m.group(0); return k
+            work.append({**b, "text": PROTECT.sub(tok, b["text"])}); prot.append(toks)
+        last = None
+        for _ in range(2):  # uma nova tentativa se o JSON vier incompleto
+            content = self._complete(SYSTEM, self._user(work, ctx))
+            m = re.search(r"\{.*\}", content, re.S)
+            try:
+                items = json.loads(m.group(0))["items"] if m else []
+                byid = {str(i["id"]): i for i in items}
+            except (ValueError, KeyError, TypeError):
+                byid = {}
+            if all(b["id"] in byid and str(byid[b["id"]].get("text", "")).strip() for b in blocks):
+                break
+            last = [b["id"] for b in blocks if b["id"] not in byid]
+        else:
+            raise ProviderError("geracao", f"O modelo não devolveu todos os trechos ({', '.join(last or [])}). Nada foi salvo para esta parte; tente continuar.")
+        out = []
+        for b, toks in zip(blocks, prot):
+            i = byid[b["id"]]; text = str(i["text"]); flags = []
+            for k, v in toks.items():
+                if k in text: text = text.replace(k, v)
+                else: flags.append({"kind": "conferir", "msg": f"Trecho protegido ausente na adaptação: “{v}”. Confira."})
+            for g in ctx.get("glossary", []):
+                want = g["source"] if g.get("keep") or not g.get("target") else g["target"]
+                if re.search(r"(?<!\w)" + re.escape(g["source"]) + r"(?!\w)", b["text"]) and want not in text:
+                    flags.append({"kind": "glossario", "msg": f"Termo do glossário “{g['source']}” deveria aparecer como “{want}”."})
+            if b["type"] == "reference" and ctx.get("keep_references", True):
+                text = b["text"]; flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original."})
+            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip()]
+            out.append({"id": b["id"], "text": text, "flags": flags})
         return out
 
 
+class OllamaProvider(LLMProvider):
+    name = "ollama"
+
+    def __init__(self):
+        self.base = os.environ.get("WISER_OLLAMA_URL", "http://localhost:11434/v1").rstrip("/")
+        self.model = os.environ.get("WISER_MODEL", "qwen2.5:1.5b")
+        self.label = f"Ollama local ({self.model})"
+        self.privacy = "Roda neste computador: o manuscrito não sai da máquina."
+
+    def available(self, src, tgt):
+        try:
+            with urllib.request.urlopen(self.base + "/models", timeout=3) as r:
+                ids = [m["id"] for m in json.load(r).get("data", [])]
+        except Exception:
+            return False, f"Ollama não está acessível em {self.base}. Inicie com `ollama serve`."
+        if self.model not in ids:
+            return False, f"Modelo {self.model} não está instalado no Ollama (`ollama pull {self.model}`)."
+        return True, ""
+
+    def _complete(self, system, user):
+        r = _http_json(self.base + "/chat/completions", {"model": self.model, "temperature": 0.2,
+                       "response_format": {"type": "json_object"},
+                       "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}, {})
+        return r["choices"][0]["message"]["content"]
+
+
+class GeminiProvider(LLMProvider):
+    name = "gemini"
+
+    def __init__(self):
+        self.key = os.environ.get("GEMINI_API_KEY", "")
+        self.model = os.environ.get("WISER_MODEL", "gemini-2.5-flash")
+        self.label = f"Google Gemini ({self.model})"
+        self.privacy = ("O manuscrito é enviado à API do Google Gemini. Na faixa gratuita, o Google pode usar o conteúdo "
+                        "enviado para melhorar seus produtos; use uma conta paga se o texto for confidencial.")
+
+    def available(self, src, tgt):
+        if not self.key:
+            return False, "Chave ausente: defina GEMINI_API_KEY no servidor (arquivo .env)."
+        return True, ""
+
+    def _complete(self, system, user):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        r = _http_json(url, {"systemInstruction": {"parts": [{"text": system}]},
+                             "contents": [{"role": "user", "parts": [{"text": user}]}],
+                             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}},
+                       {"x-goog-api-key": self.key})
+        try:
+            return r["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError):
+            raise ProviderError("geracao", "O Gemini não devolveu texto (possível bloqueio de conteúdo).")
+
+
+PROVIDERS = {"gemini": GeminiProvider, "ollama": OllamaProvider, "argos": ArgosProvider}
+
+
 def get_provider(src, tgt):
-    """Retorna (provider|None, status dict)."""
-    choice = os.environ.get("WISER_PROVIDER", "auto").lower()
-    cands = {"argos": [ArgosProvider()], "openai": [OpenAICompatProvider()], "none": [],
-             "auto": [OpenAICompatProvider(), ArgosProvider()]}.get(choice, [])
-    reasons = []
-    for p in cands:
-        ok, why = p.available(src, tgt)
-        if ok:
-            return p, {"ok": True, "provider": p.name, "label": p.label, "applies_style": p.applies_style}
-        reasons.append(f"{p.name}: {why}")
-    return None, {"ok": False, "reasons": reasons, "help": SETUP_HELP}
+    """Usa SOMENTE o provedor definido em WISER_PROVIDER. Sem troca silenciosa."""
+    choice = os.environ.get("WISER_PROVIDER", "").strip().lower()
+    if choice not in PROVIDERS:
+        return None, {"ok": False, "reasons": [f"WISER_PROVIDER não definido ou inválido ({choice or 'vazio'}). Use gemini, ollama ou argos."], "help": SETUP_HELP}
+    p = PROVIDERS[choice]()
+    ok, why = p.available(src, tgt)
+    if ok:
+        return p, {"ok": True, "provider": p.name, "label": p.label, "applies_style": p.applies_style, "privacy": p.privacy}
+    return None, {"ok": False, "provider": p.name, "reasons": [f"{p.label}: {why}"], "help": SETUP_HELP}
 
 
 def chunk(blocks, budget=2500):

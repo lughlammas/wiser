@@ -134,8 +134,13 @@ async function step3() {
   <section class="card" aria-labelledby="h-gl"><h2 id="h-gl">Glossário do projeto</h2><p class="hint">Termos que devem ficar sempre iguais. Deixe "tradução" vazia ou marque "manter" para não traduzir.</p>
    <table class="gl"><thead><tr><th scope="col">Termo no original</th><th scope="col">Tradução fixa</th><th scope="col">Manter</th><th scope="col"><span class="hint">Ação</span></th></tr></thead><tbody id="gl"></tbody></table>
    <div class="actions" style="justify-content:flex-start"><button type="button" id="add">Adicionar termo</button><button type="button" id="sug">Sugerir nomes recorrentes</button></div><div id="sugbox"></div></section>
+  <section class="card" aria-labelledby="h-prov"><h2 id="h-prov">Antes de gerar</h2><div id="prov">Verificando o provedor de IA…</div></section>
   <div id="st" aria-live="polite"></div>
   <div class="actions"><a class="btn" href="#/p/${P.id}/2">Voltar</a><button class="primary" id="run">${Object.keys(P.adaptation).length ? "Salvar e continuar adaptação" : "Gerar adaptação"}</button></div></form>`;
+  api(`/api/status?src=${encodeURIComponent(s.src)}&tgt=${encodeURIComponent(s.tgt)}`).then(st => {
+    $("#prov").innerHTML = st.ok ? `<p>Provedor selecionado: <b>${esc(st.label)}</b>.</p><p class="warn">🔒 ${esc(st.privacy)}</p>${st.applies_style ? "" : `<p class="warn">Este provedor faz tradução direta: estilo, público, região e tom não são aplicados automaticamente.</p>`}` : setupHelp(st);
+    $("#run").disabled = !st.ok;
+  });
   let gl = P.glossary.slice();
   const draw = () => { $("#gl").innerHTML = gl.map((g, i) => `<tr><td><input type="text" aria-label="Termo ${i+1}" data-i="${i}" data-k="source" value="${esc(g.source)}"></td><td><input type="text" aria-label="Tradução do termo ${i+1}" data-i="${i}" data-k="target" value="${esc(g.target)}"></td><td><input type="checkbox" aria-label="Manter termo ${i+1}" data-i="${i}" data-k="keep" ${g.keep ? "checked" : ""}></td><td><button type="button" data-del="${i}">Remover</button></td></tr>`).join("") || `<tr><td colspan="4">Nenhum termo.</td></tr>`; };
   draw();
@@ -162,7 +167,7 @@ function jobBox() {
   const j = P.job || {};
   if (j.state === "running") return `<div class="card"><p>Adaptando com ${esc(j.provider)}… parte ${j.done} de ${j.total}. Você pode sair; o progresso fica salvo.</p><progress max="${j.total}" value="${j.done}"></progress></div>`;
   if (j.state === "blocked") return setupHelp(j.status);
-  if (j.state === "error") return `<p class="err">${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
+  if (j.state === "error") return `<p class="err"><b>${({chave:"Chave de acesso",indisponivel:"Serviço indisponível",limite:"Limite de uso",geracao:"Erro de geração"})[j.kind] || "Erro"}:</b> ${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
   if (j.state === "done") return (j.notes || []).map(n => `<p class="warn">⚠ ${esc(n)}</p>`).join("") + `<p class="hint">Gerado por: ${esc(j.provider)}</p>`;
   return "";
 }
