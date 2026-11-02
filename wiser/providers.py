@@ -89,23 +89,21 @@ class ArgosProvider(Provider):
         gl = [g for g in ctx.get("glossary", []) if g.get("source")]
         gl.sort(key=lambda g: -len(g["source"]))
         out = []
+        rep = {g["source"]: (g["source"] if g.get("keep") or not g.get("target") else g["target"]) for g in gl}
+        alts = [PROTECT.pattern] + [r"(?<!\w)" + re.escape(g["source"]) + r"(?!\w)" for g in gl]
+        split = re.compile(r"(\(?\s*(?:" + "|".join(alts) + r")\s*\)?)")
         for b in blocks:
-            text, toks, flags = b["text"], {}, []
-            def tok(val):
-                k = f"ZQX{len(toks)}"; toks[k] = val; return k
-            text = PROTECT.sub(lambda m: tok(m.group(0)), text)
-            used = []
-            for g in gl:
-                pat = re.compile(r"(?<!\w)" + re.escape(g["source"]) + r"(?!\w)")
-                if pat.search(text):
-                    tgt = g["source"] if g.get("keep") or not g.get("target") else g["target"]
-                    text = pat.sub(lambda m: tok(tgt), text); used.append(g["source"])
-            res = tr.translate(text) if text.strip() else text
-            for k, v in toks.items():
-                if k in res:
-                    res = res.replace(k, v)
-                else:
-                    flags.append({"kind": "conferir", "msg": f"Trecho protegido pode ter sido perdido: “{v}”. Confira."})
+            text, flags = b["text"], []
+            used = [g for g in rep if re.search(r"(?<!\w)" + re.escape(g) + r"(?!\w)", text)]
+            def fix(span):
+                for g, t in rep.items():
+                    span = re.sub(r"(?<!\w)" + re.escape(g) + r"(?!\w)", t, span)
+                return span
+            # trechos protegidos (URLs, escrita hebraica/árabe, termos do glossário) não passam pelo tradutor
+            pieces = split.split(text)
+            res = "".join(fix(pc) if i % 2 else pc if not re.search(r"[^\W\d_]{2}", pc) else
+                          (pc[:len(pc) - len(pc.lstrip())] + tr.translate(pc.strip()) + pc[len(pc.rstrip()):])
+                          for i, pc in enumerate(pieces))
             if used:
                 flags.append({"kind": "glossario", "msg": "Glossário aplicado: " + ", ".join(used)})
             if re.search(r"[“”\"']", b["text"]):
