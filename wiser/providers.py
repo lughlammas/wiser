@@ -141,11 +141,22 @@ def _http_json(url, body, headers, timeout=300):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
-        detail = e.read()[:300].decode("utf-8", "replace")
+        raw = e.read()[:2000].decode("utf-8", "replace")
+        try:
+            detail = json.loads(raw).get("error", {}).get("message", raw)
+        except (ValueError, AttributeError):
+            detail = raw
+        detail = detail[:300]
+        low = detail.lower()
+        if "free tier is not available" in low or "billing" in low:
+            raise ProviderError("chave", "A chave é válida, mas a faixa gratuita da API não está disponível para este projeto Google; "
+                                         "seria preciso ativar cobrança (o WISER não faz isso). Use outro provedor ou outro projeto. Detalhe: " + detail)
+        if e.code == 404 and ("no longer available" in low or "not found" in low):
+            raise ProviderError("modelo", "O modelo configurado em WISER_MODEL não está disponível para esta chave. Detalhe: " + detail)
         if e.code == 429:
             raise ProviderError("limite", "Limite de uso do provedor atingido (429). Espere alguns minutos e clique em continuar; o que já foi feito está salvo.")
         if e.code in (401, 403):
-            raise ProviderError("chave", f"O provedor recusou a chave de acesso ({e.code}). Confira a variável de ambiente no servidor.")
+            raise ProviderError("chave", f"O provedor recusou a chave de acesso ({e.code}). Confira a variável de ambiente no servidor. Detalhe: {detail}")
         raise ProviderError("geracao", f"O provedor respondeu com erro {e.code}: {detail}")
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
         raise ProviderError("indisponivel", f"Serviço de IA indisponível: {getattr(e, 'reason', e)}")
@@ -262,7 +273,7 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self):
         self.key = os.environ.get("GEMINI_API_KEY", "")
-        self.model = os.environ.get("WISER_MODEL", "gemini-2.5-flash")
+        self.model = os.environ.get("WISER_MODEL", "gemini-flash-latest")
         self.label = f"Google Gemini ({self.model})"
         self.privacy = ("O manuscrito é enviado à API do Google Gemini. Na faixa gratuita, o Google pode usar o conteúdo "
                         "enviado para melhorar seus produtos; use uma conta paga se o texto for confidencial.")

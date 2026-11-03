@@ -187,7 +187,7 @@ function jobBox() {
   const j = P.job || {};
   if (j.state === "running") return `<div class="card"><p>Adaptando com ${esc(j.provider)}… parte ${j.done} de ${j.total}. Você pode sair; o progresso fica salvo.</p><progress max="${j.total}" value="${j.done}"></progress></div>`;
   if (j.state === "blocked") return setupHelp(j.status);
-  if (j.state === "error") return `<p class="err"><b>${({chave:"Chave de acesso",indisponivel:"Serviço indisponível",limite:"Limite de uso",geracao:"Erro de geração"})[j.kind] || "Erro"}:</b> ${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
+  if (j.state === "error") return `<p class="err"><b>${({chave:"Chave de acesso",indisponivel:"Serviço indisponível",limite:"Limite de uso",geracao:"Erro de geração",modelo:"Modelo indisponível"})[j.kind] || "Erro"}:</b> ${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
   if (j.state === "done") return (j.notes || []).map(n => `<p class="warn">⚠ ${esc(n)}</p>`).join("") + `<p class="hint">Gerado por: ${esc(j.provider)}</p>`;
   return "";
 }

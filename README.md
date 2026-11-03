@@ -22,7 +22,7 @@ se o escolhido falhar, a tela explica o motivo e nada é simulado.
 | `WISER_PROVIDER` | O que é | Configuração | Privacidade |
 |---|---|---|---|
 | `ollama` | modelo local via API compatível OpenAI | `ollama serve`; `WISER_MODEL` (padrão `qwen2.5:1.5b`); `WISER_OLLAMA_URL` (padrão `http://localhost:11434/v1`). Só aparece como disponível se o servidor responder e o modelo existir. | texto não sai da máquina |
-| `gemini` | Google Gemini API | `GEMINI_API_KEY` (só no servidor), `WISER_MODEL` (padrão `gemini-2.5-flash`) | texto vai ao Google; na faixa grátis pode ser usado para melhorar produtos |
+| `gemini` | Google Gemini API | `GEMINI_API_KEY` (só no servidor), `WISER_MODEL` (padrão `gemini-flash-latest`) | texto vai ao Google; na faixa grátis pode ser usado para melhorar produtos |
 | `argos` | Argos Translate (NMT local) | `.venv/bin/python -m wiser.setup_argos pt en` | local; tradução direta, **não** aplica estilo/tom |
 
 Mensagens tratadas: chave ausente/recusada, serviço indisponível, limite de uso (429), erro de geração

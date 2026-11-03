@@ -195,3 +195,17 @@ def test_identical_other_language_and_duplicate():
          "adaptation": {"b1": {"text": "The same adapted text repeated here.", "flags": []},
                         "b2": {"text": "The same adapted text repeated here.", "flags": []}}}
     assert issues(p, None)["blockers"][0]["block"] == "b2"
+
+
+@pytest.mark.parametrize("code,body,kind,frag", [
+    (403, '{"error":{"code":403,"message":"The Gemini API free tier is not available for this project. Please set up billing"}}', "chave", "faixa gratuita"),
+    (404, '{"error":{"code":404,"message":"This model models/x is no longer available to new users."}}', "modelo", "WISER_MODEL"),
+    (401, '{"error":{"message":"API key not valid"}}', "chave", "API key not valid"),
+])
+def test_gemini_error_messages(monkeypatch, code, body, kind, frag):
+    import urllib.error, wiser.providers as pv
+    def boom(*a, **k): raise urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(body.encode()))
+    monkeypatch.setattr(pv.urllib.request, "urlopen", boom)
+    with pytest.raises(pv.ProviderError) as e:
+        pv._http_json("http://x", {}, {"x-goog-api-key": "SEGREDO"})
+    assert e.value.kind == kind and frag in str(e.value) and "SEGREDO" not in str(e.value)
