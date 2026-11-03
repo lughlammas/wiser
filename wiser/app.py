@@ -140,7 +140,7 @@ def _run(pid):
     if not prov:
         p["job"] = {"state": "blocked", "status": st}; store.save(p); return
     todo = [b for b in p["blocks"] if b["id"] not in p["adaptation"]]
-    parts = chunk(todo, int(os.environ.get("WISER_CHUNK_CHARS", "1500")))
+    parts = chunk(todo, int(os.environ.get("WISER_CHUNK_CHARS", "900")))
     p["job"] = {"state": "running", "provider": st["label"], "done": 0, "total": len(parts), "started": time.time()}
     store.save(p)
     ctx = {"src": src, "tgt": tgt, "src_name": s["src"], "tgt_name": s["tgt"], "style": s["style"],

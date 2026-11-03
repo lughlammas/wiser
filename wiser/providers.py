@@ -180,9 +180,25 @@ class LLMProvider(Provider):
                 break
             last = [b["id"] for b in blocks if b["id"] not in byid]
         else:
-            raise ProviderError("geracao", f"O modelo não devolveu todos os trechos ({', '.join(last or [])}). Nada foi salvo para esta parte; tente continuar.")
+            if len(blocks) > 1:  # reparte: pede os trechos que faltaram um a um, mantendo a ordem
+                got = {}
+                for b in blocks:
+                    if b["id"] not in byid or not str(byid[b["id"]].get("text", "")).strip():
+                        got[b["id"]] = self.translate_chunk([b], ctx)[0]
+                part = {b["id"]: b for b in blocks if b["id"] not in got}
+                first = self.translate_chunk_from(byid, [b for b in blocks if b["id"] in part], ctx) if part else []
+                firstd = {r["id"]: r for r in first}
+                return [got.get(b["id"]) or firstd[b["id"]] for b in blocks]
+            raise ProviderError("geracao", f"O modelo não devolveu todos os trechos ({', '.join(last or [])}). Nada foi salvo para esta parte")
+        return self.translate_chunk_from(byid, blocks, ctx)
+
+    def translate_chunk_from(self, byid, blocks, ctx):
         out = []
-        for b, toks in zip(blocks, prot):
+        for b in blocks:
+            toks = {}
+            def tok(m):
+                k = f"ZQX{len(toks)}"; toks[k] = m.group(0); return k
+            PROTECT.sub(tok, b["text"])
             i = byid[b["id"]]; text = str(i["text"]); flags = []
             for k, v in toks.items():
                 if k in text: text = text.replace(k, v)
@@ -193,7 +209,7 @@ class LLMProvider(Provider):
                     flags.append({"kind": "glossario", "msg": f"Termo do glossário “{g['source']}” deveria aparecer como “{want}”."})
             if b["type"] == "reference" and ctx.get("keep_references", True):
                 text = b["text"]; flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original."})
-            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip()]
+            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma")]
             out.append({"id": b["id"], "text": text, "flags": flags})
         return out
 
@@ -218,7 +234,7 @@ class OllamaProvider(LLMProvider):
         return True, ""
 
     def _complete(self, system, user):
-        r = _http_json(self.base + "/chat/completions", {"model": self.model, "temperature": 0.2,
+        r = _http_json(self.base + "/chat/completions", {"model": self.model, "temperature": 0.2, "max_tokens": 3000,
                        "response_format": {"type": "json_object"},
                        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}, {})
         return r["choices"][0]["message"]["content"]
