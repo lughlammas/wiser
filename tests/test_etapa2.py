@@ -183,3 +183,15 @@ def test_kept_reference_has_no_false_loss():
     out = P().translate_chunk([{"id": "b1", "type": "reference", "text": "Silva, Manual. https://exemplo.org/h"}], {"src_name": "pt", "tgt_name": "en"})
     assert out[0]["text"] == "Silva, Manual. https://exemplo.org/h"
     assert not any(f["kind"] == "perda" for f in out[0]["flags"])
+
+
+def test_identical_other_language_and_duplicate():
+    from wiser.review import residue, issues
+    s = "Na mesma ordem, graça e rigor."
+    assert residue(s, s, "pt", "pl")["kind"] == "residuo"
+    fr = "Les écoles peuvent ajouter des cartes et des couleurs dans le texte pour une autre lecture."
+    assert "outro idioma" in residue("x", fr, "pt", "en")["msg"]
+    p = {"blocks": [{"id": "b1", "text": "Primeiro trecho original."}, {"id": "b2", "text": "Segundo trecho bem diferente."}],
+         "adaptation": {"b1": {"text": "The same adapted text repeated here.", "flags": []},
+                        "b2": {"text": "The same adapted text repeated here.", "flags": []}}}
+    assert issues(p, None)["blockers"][0]["block"] == "b2"

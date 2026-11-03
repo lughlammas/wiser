@@ -45,6 +45,16 @@ def residue(src_text, out_text, src, tgt, btype="paragraph", kept=False):
         return None
     S, T = set(STOP.get(src, [])) - AMBIG, set(STOP.get(tgt, [])) - AMBIG
     words = _words(out_text)
+    if words and out_text.strip() == src_text.strip() and len(words) >= 4:
+        return {"kind": "residuo", "msg": "Trecho idêntico ao original: não foi adaptado."}
+    if S and T:
+        t0 = sum(w in T for w in words)
+        for code, lst in STOP.items():
+            if code in (src, tgt):
+                continue
+            o = sum(w in (set(lst) - AMBIG - S - T) for w in words)
+            if o >= 3 and o > t0:
+                return {"kind": "residuo", "msg": f"Trecho parece estar em outro idioma ({code}), nem origem nem destino."}
     if not S or not T:
         return {"kind": "revisao", "msg": "Revisão necessária: não há verificação automática de idioma para este par."}
     if len(words) < 4:
@@ -89,6 +99,17 @@ def issues(p, lang_code):
                 continue
             item = {"block": bid, "n": n, "msg": f["msg"], "kind": f.get("kind"), "excerpt": byid.get(bid, {}).get("text", "")[:90]}
             {"bloqueador": blockers, "aviso": warnings, "info": infos}[severity(f)].append(item)
+    # mesma adaptação para trechos de origem diferentes: provável perda de conteúdo
+    seen = {}
+    for b in p["blocks"]:
+        a = p["adaptation"].get(b["id"])
+        if not a or len(a.get("text", "")) < 30:
+            continue
+        k = a["text"].strip()
+        if k in seen and byid[seen[k]]["text"].strip() != b["text"].strip() and not a.get("dup_resolved"):
+            blockers.append({"block": b["id"], "n": -1, "kind": "perda", "excerpt": b["text"][:90],
+                             "msg": f"A adaptação repete a de outro trecho ({seen[k]}): o conteúdo deste trecho pode ter sido perdido. Edite o texto."})
+        seen.setdefault(k, b["id"])
     order = {b["id"]: i for i, b in enumerate(p["blocks"])}
     for l in (blockers, warnings, infos):
         l.sort(key=lambda x: (order.get(x["block"], 0), x["n"]))
