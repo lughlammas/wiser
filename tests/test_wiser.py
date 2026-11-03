@@ -2,7 +2,8 @@ import io, json, os, hashlib
 from pathlib import Path
 import pytest
 
-PDF = Path("/cursor/stores/store-1352803c-771a-4461-a003-689f19b8aea8/grok-bot/agents/5cfe2274-12f2-4f6d-8a3c-96d364df365d/attachments/01M6FA0WZ4JWC4812QWQ1TAEZG.pdf")
+FIX = Path(__file__).parent / "fixtures"
+PDF = FIX / "sintetico.pdf"
 
 
 @pytest.fixture
@@ -37,20 +38,24 @@ def test_docx_roundtrip():
     assert [x["type"] for x in b] == ["heading", "paragraph", "quote"]
 
 
-@pytest.mark.skipif(not PDF.exists(), reason="PDF de teste ausente")
-def test_pdf_test_manuscript():
+def test_pdf_fixture_structure():
     from wiser.ingest import ingest, sections
     before = hashlib.sha256(PDF.read_bytes()).hexdigest()
     b, w, k = ingest(PDF.name, PDF.read_bytes())
     heads = [x["text"] for x in b if x["type"] == "heading"]
-    assert "1. O que são os 32 caminhos" in heads and "Referências e nota editorial" in heads
-    assert sum(x["type"] == "list_item" for x in b) >= 30
+    assert "1. Como preparar o solo" in heads and "Referências" in heads
+    assert [x["text"][:2] for x in b if x["type"] == "list_item"] == ["1.", "2."]
     assert any(x["type"] == "reference" for x in b) and any(x["type"] == "note" for x in b)
-    assert not any("CADERNO DE ESTUDO" in x["text"] for x in b)  # cabeçalho repetido removido
-    assert any("(א)" in x["text"] for x in b)
-    assert any("hebraico" in x for x in w)
-    assert len(sections(b)) >= 10
+    assert not any("CADERNO SINTÉTICO" in x["text"] for x in b)
+    assert any("repetidos" in x for x in w)
+    assert len(sections(b)) >= 4
     assert hashlib.sha256(PDF.read_bytes()).hexdigest() == before
+
+
+def test_txt_hebrew_kept():
+    from wiser.ingest import ingest
+    b, w, k = ingest("t.txt", (FIX / "sintetico.txt").read_bytes())
+    assert any("(א)" in x["text"] for x in b)
 
 
 def test_chunk_preserves_order():
@@ -107,18 +112,18 @@ class FakeLLM:
 def test_full_flow_edit_glossary_export(client, monkeypatch):
     c, app = client
     monkeypatch.setattr(app, "get_provider", lambda s, t: (FakeLLM(), {"ok": True, "label": "fake", "applies_style": True}))
-    p = c.post("/api/projects", files={"file": ("m.md", "# Livro\n\n## Um\n\nTexto de Keter.\n\n- item".encode())}).json()
+    p = c.post("/api/projects", files={"file": ("m.md", "# Livro\n\n## Um\n\nTexto de Mirela.\n\n- item".encode())}).json()
     pid = p["id"]
     c.patch(f"/api/projects/{pid}", json={"settings": {"tgt": "Inglês", "style": "xx"}})
     assert c.get(f"/api/projects/{pid}").json()["settings"]["style"] == "natural"
-    assert c.put(f"/api/projects/{pid}/glossary", json={"entries": [{"source": "Keter", "keep": True}, {"source": " "}]}).json()["glossary"] == [{"source": "Keter", "target": "", "keep": True, "note": ""}]
+    assert c.put(f"/api/projects/{pid}/glossary", json={"entries": [{"source": "Mirela", "keep": True}, {"source": " "}]}).json()["glossary"] == [{"source": "Mirela", "target": "", "keep": True, "note": ""}]
     assert c.post(f"/api/projects/{pid}/adapt").status_code == 200
     app._jobs[pid].join(5)
     j = c.get(f"/api/projects/{pid}").json()
     assert j["job"]["state"] == "done" and len(j["adaptation"]) == 4
-    c.put(f"/api/projects/{pid}/blocks/b0002", json={"text": "Keter's text."})
+    c.put(f"/api/projects/{pid}/blocks/b0002", json={"text": "Mirela's text."})
     md = c.get(f"/api/projects/{pid}/export.md").text
-    assert md.splitlines()[0] == "# [EN] Livro" and "Keter's text." in md
+    assert md.splitlines()[0] == "# [EN] Livro" and "Mirela's text." in md
     d = c.get(f"/api/projects/{pid}/export.docx")
     assert d.status_code == 200 and d.content[:2] == b"PK"
     assert any(x["id"] == pid for x in c.get("/api/projects").json()["projects"])
@@ -129,14 +134,14 @@ def test_argos_glossary_and_protection():
     a = ArgosProvider()
     if not a.available("pt", "en")[0]:
         pytest.skip("par pt-en do Argos não instalado")
-    out = a.translate_chunk([{"id": "b1", "type": "paragraph", "text": "Aleph (א) pertence ao Sefer Yetzirah, ver https://x.org/a."}],
-                            {"src": "pt", "tgt": "en", "glossary": [{"source": "Sefer Yetzirah", "keep": True}]})
+    out = a.translate_chunk([{"id": "b1", "type": "paragraph", "text": "Aleph (א) pertence ao Livro Verde, ver https://x.org/a."}],
+                            {"src": "pt", "tgt": "en", "glossary": [{"source": "Livro Verde", "keep": True}]})
     t = out[0]["text"]
-    assert "(א)" in t and "Sefer Yetzirah" in t and "https://x.org/a" in t
+    assert "(א)" in t and "Livro Verde" in t and "https://x.org/a" in t
 
 
 def test_sanity_flags():
     from wiser.providers import sanity_flags
     assert sanity_flags("5. As sete letras-duplas", "Beth, Gimel and Tav are the seven doubles.")
-    assert sanity_flags("Fato textual: o livro apresenta 32 caminhos.", "The book presents 32 paths.")
-    assert not sanity_flags("1. Keter - Coroa.", "1. Keter - Crown.")
+    assert sanity_flags("Observação: o livro apresenta dez capítulos.", "The book presents ten chapters.")
+    assert not sanity_flags("1. Mirela - Rosa.", "1. Mirela - Rose.")

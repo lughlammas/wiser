@@ -1,9 +1,21 @@
+# segredos
 .env
+.env.*
+!.env.example
 *.key
+*.pem
+credentials*.json
+# dados locais: projetos, manuscritos enviados, exportações
+data/
+uploads/
+exports/
+*.docx
+*.pdf
+!tests/fixtures/*.docx
+!tests/fixtures/*.pdf
+# ambiente e temporários
 .venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-data/
 *.tmp
-screenshots/*.tmp

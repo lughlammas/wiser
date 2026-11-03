@@ -105,7 +105,7 @@ class ArgosProvider(Provider):
                           (pc[:len(pc) - len(pc.lstrip())] + tr.translate(pc.strip()) + pc[len(pc.rstrip()):])
                           for i, pc in enumerate(pieces))
             if used:
-                flags.append({"kind": "glossario", "msg": "Glossário aplicado: " + ", ".join(used)})
+                flags.append({"kind": "glossario_ok", "msg": "Glossário aplicado: " + ", ".join(used)})
             if re.search(r"[“”\"']", b["text"]):
                 flags.append({"kind": "citacao", "msg": "Há aspas/termos entre aspas: confira se a citação ou o termo destacado foi tratado como o projeto pede."})
             if b["type"] == "reference":
@@ -125,7 +125,7 @@ def sanity_flags(src: str, out: str) -> list[dict]:
     if len(src) > 25 and (r < 0.6 or r > 1.7):
         f.append({"kind": "conferir", "msg": f"Tamanho muito diferente do original ({r:.0%}): possível omissão ou acréscimo."})
     if src.count(":") > out.count(":"):
-        f.append({"kind": "conferir", "msg": "Rótulos com dois-pontos do original (ex.: “Fato textual:”) podem ter sido omitidos."})
+        f.append({"kind": "conferir", "msg": "Rótulos com dois-pontos do original (ex.: “Observação:”) podem ter sido omitidos."})
     return f
 
 
@@ -214,16 +214,18 @@ class LLMProvider(Provider):
                 k = f"ZQX{len(toks)}"; toks[k] = m.group(0); return k
             PROTECT.sub(tok, b["text"])
             i = byid[b["id"]]; text = str(i["text"]); flags = []
+            if b["type"] == "reference" and ctx.get("keep_references", True):
+                toks = {}  # a referência é mantida igual ao original: nada se perde
             for k, v in toks.items():
                 if k in text: text = text.replace(k, v)
-                else: flags.append({"kind": "conferir", "msg": f"Trecho protegido ausente na adaptação: “{v}”. Confira."})
+                else: flags.append({"kind": "perda", "msg": f"Trecho protegido ausente na adaptação: “{v}”. Confira."})
             for g in ctx.get("glossary", []):
                 want = g["source"] if g.get("keep") or not g.get("target") else g["target"]
                 if re.search(r"(?<!\w)" + re.escape(g["source"]) + r"(?!\w)", b["text"]) and want not in text:
                     flags.append({"kind": "glossario", "msg": f"Termo do glossário “{g['source']}” deveria aparecer como “{want}”."})
             if b["type"] == "reference" and ctx.get("keep_references", True):
                 text = b["text"]; flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original."})
-            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma")]
+            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma") and len(str(f).split()) >= 3]  # descarta rótulos vazios como "translation_required"
             flags = sanity_flags(b["text"], text) + flags
             out.append({"id": b["id"], "text": text, "flags": flags})
         return out

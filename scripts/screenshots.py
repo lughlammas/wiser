@@ -1,7 +1,8 @@
 """Screenshots headless das telas. Uso: python scripts/screenshots.py [project_id]"""
 import sys
 from playwright.sync_api import sync_playwright
-B = "http://127.0.0.1:8765"
+import os
+B = os.environ.get("WISER_URL", "http://127.0.0.1:8765")
 pid = sys.argv[1] if len(sys.argv) > 1 else None
 with sync_playwright() as p:
     br = p.chromium.launch()
