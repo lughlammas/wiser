@@ -133,3 +133,10 @@ def test_argos_glossary_and_protection():
                             {"src": "pt", "tgt": "en", "glossary": [{"source": "Sefer Yetzirah", "keep": True}]})
     t = out[0]["text"]
     assert "(א)" in t and "Sefer Yetzirah" in t and "https://x.org/a" in t
+
+
+def test_sanity_flags():
+    from wiser.providers import sanity_flags
+    assert sanity_flags("5. As sete letras-duplas", "Beth, Gimel and Tav are the seven doubles.")
+    assert sanity_flags("Fato textual: o livro apresenta 32 caminhos.", "The book presents 32 paths.")
+    assert not sanity_flags("1. Keter - Coroa.", "1. Keter - Crown.")

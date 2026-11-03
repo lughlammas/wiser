@@ -111,8 +111,22 @@ class ArgosProvider(Provider):
             if b["type"] == "reference":
                 res = b["text"] if ctx.get("keep_references", True) else res
                 flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original." if ctx.get("keep_references", True) else "Referência traduzida: confira."})
-            out.append({"id": b["id"], "text": res, "flags": flags})
+            out.append({"id": b["id"], "text": res, "flags": sanity_flags(b["text"], res) + flags})
         return out
+
+
+def sanity_flags(src: str, out: str) -> list[dict]:
+    """Checagens automáticas de fidelidade (não substituem revisão humana)."""
+    f = []
+    ns, no = re.match(r"^\s*(\d+)[.)]", src), re.match(r"^\s*(\d+)[.)]", out)
+    if (ns and not no) or (ns and no and ns.group(1) != no.group(1)):
+        f.append({"kind": "conferir", "msg": "A numeração do original não foi mantida neste trecho."})
+    r = len(out) / max(len(src), 1)
+    if len(src) > 25 and (r < 0.6 or r > 1.7):
+        f.append({"kind": "conferir", "msg": f"Tamanho muito diferente do original ({r:.0%}): possível omissão ou acréscimo."})
+    if src.count(":") > out.count(":"):
+        f.append({"kind": "conferir", "msg": "Rótulos com dois-pontos do original (ex.: “Fato textual:”) podem ter sido omitidos."})
+    return f
 
 
 class ProviderError(RuntimeError):
@@ -173,7 +187,7 @@ class LLMProvider(Provider):
             m = re.search(r"\{.*\}", content, re.S)
             try:
                 items = json.loads(m.group(0))["items"] if m else []
-                byid = {str(i["id"]): i for i in items}
+                byid = {str(i["id"]): i for i in items if isinstance(i, dict) and "id" in i}
             except (ValueError, KeyError, TypeError):
                 byid = {}
             if all(b["id"] in byid and str(byid[b["id"]].get("text", "")).strip() for b in blocks):
@@ -210,6 +224,7 @@ class LLMProvider(Provider):
             if b["type"] == "reference" and ctx.get("keep_references", True):
                 text = b["text"]; flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original."})
             flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma")]
+            flags = sanity_flags(b["text"], text) + flags
             out.append({"id": b["id"], "text": text, "flags": flags})
         return out
 
