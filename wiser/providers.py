@@ -105,7 +105,7 @@ class ArgosProvider(Provider):
                           (pc[:len(pc) - len(pc.lstrip())] + tr.translate(pc.strip()) + pc[len(pc.rstrip()):])
                           for i, pc in enumerate(pieces))
             if used:
-                flags.append({"kind": "glossario", "msg": "Glossário aplicado: " + ", ".join(used)})
+                flags.append({"kind": "glossario_ok", "msg": "Glossário aplicado: " + ", ".join(used)})
             if re.search(r"[“”\"']", b["text"]):
                 flags.append({"kind": "citacao", "msg": "Há aspas/termos entre aspas: confira se a citação ou o termo destacado foi tratado como o projeto pede."})
             if b["type"] == "reference":
@@ -125,7 +125,7 @@ def sanity_flags(src: str, out: str) -> list[dict]:
     if len(src) > 25 and (r < 0.6 or r > 1.7):
         f.append({"kind": "conferir", "msg": f"Tamanho muito diferente do original ({r:.0%}): possível omissão ou acréscimo."})
     if src.count(":") > out.count(":"):
-        f.append({"kind": "conferir", "msg": "Rótulos com dois-pontos do original (ex.: “Fato textual:”) podem ter sido omitidos."})
+        f.append({"kind": "conferir", "msg": "Rótulos com dois-pontos do original (ex.: “Observação:”) podem ter sido omitidos."})
     return f
 
 
@@ -141,11 +141,22 @@ def _http_json(url, body, headers, timeout=300):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.load(r)
     except urllib.error.HTTPError as e:
-        detail = e.read()[:300].decode("utf-8", "replace")
+        raw = e.read()[:2000].decode("utf-8", "replace")
+        try:
+            detail = json.loads(raw).get("error", {}).get("message", raw)
+        except (ValueError, AttributeError):
+            detail = raw
+        detail = detail[:300]
+        low = detail.lower()
+        if "free tier is not available" in low or "billing" in low:
+            raise ProviderError("chave", "A chave é válida, mas a faixa gratuita da API não está disponível para este projeto Google; "
+                                         "seria preciso ativar cobrança (o WISER não faz isso). Use outro provedor ou outro projeto. Detalhe: " + detail)
+        if e.code == 404 and ("no longer available" in low or "not found" in low):
+            raise ProviderError("modelo", "O modelo configurado em WISER_MODEL não está disponível para esta chave. Detalhe: " + detail)
         if e.code == 429:
             raise ProviderError("limite", "Limite de uso do provedor atingido (429). Espere alguns minutos e clique em continuar; o que já foi feito está salvo.")
         if e.code in (401, 403):
-            raise ProviderError("chave", f"O provedor recusou a chave de acesso ({e.code}). Confira a variável de ambiente no servidor.")
+            raise ProviderError("chave", f"O provedor recusou a chave de acesso ({e.code}). Confira a variável de ambiente no servidor. Detalhe: {detail}")
         raise ProviderError("geracao", f"O provedor respondeu com erro {e.code}: {detail}")
     except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
         raise ProviderError("indisponivel", f"Serviço de IA indisponível: {getattr(e, 'reason', e)}")
@@ -214,16 +225,18 @@ class LLMProvider(Provider):
                 k = f"ZQX{len(toks)}"; toks[k] = m.group(0); return k
             PROTECT.sub(tok, b["text"])
             i = byid[b["id"]]; text = str(i["text"]); flags = []
+            if b["type"] == "reference" and ctx.get("keep_references", True):
+                toks = {}  # a referência é mantida igual ao original: nada se perde
             for k, v in toks.items():
                 if k in text: text = text.replace(k, v)
-                else: flags.append({"kind": "conferir", "msg": f"Trecho protegido ausente na adaptação: “{v}”. Confira."})
+                else: flags.append({"kind": "perda", "msg": f"Trecho protegido ausente na adaptação: “{v}”. Confira."})
             for g in ctx.get("glossary", []):
                 want = g["source"] if g.get("keep") or not g.get("target") else g["target"]
                 if re.search(r"(?<!\w)" + re.escape(g["source"]) + r"(?!\w)", b["text"]) and want not in text:
                     flags.append({"kind": "glossario", "msg": f"Termo do glossário “{g['source']}” deveria aparecer como “{want}”."})
             if b["type"] == "reference" and ctx.get("keep_references", True):
                 text = b["text"]; flags.append({"kind": "referencia", "msg": "Referência bibliográfica mantida como no original."})
-            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma")]
+            flags += [{"kind": "decisao", "msg": str(f)} for f in (i.get("flags") or []) if str(f).strip().lower() not in ("", "none", "null", "n/a", "nenhum", "nenhuma") and len(str(f).split()) >= 3]  # descarta rótulos vazios como "translation_required"
             flags = sanity_flags(b["text"], text) + flags
             out.append({"id": b["id"], "text": text, "flags": flags})
         return out
@@ -260,7 +273,7 @@ class GeminiProvider(LLMProvider):
 
     def __init__(self):
         self.key = os.environ.get("GEMINI_API_KEY", "")
-        self.model = os.environ.get("WISER_MODEL", "gemini-2.5-flash")
+        self.model = os.environ.get("WISER_MODEL", "gemini-flash-latest")
         self.label = f"Google Gemini ({self.model})"
         self.privacy = ("O manuscrito é enviado à API do Google Gemini. Na faixa gratuita, o Google pode usar o conteúdo "
                         "enviado para melhorar seus produtos; use uma conta paga se o texto for confidencial.")

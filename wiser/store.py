@@ -59,3 +59,17 @@ def listing():
 
 def export_dir(pid):
     return _dir(pid) / "exports"
+
+
+def delete(pid):
+    """Remove o projeto inteiro: dados, cópia do original e exportações. Só arquivos locais."""
+    import shutil
+    d = _dir(pid)
+    if not (d / "project.json").exists():
+        raise KeyError(pid)
+    for f in d.rglob("*"):
+        if f.is_file():
+            f.chmod(0o600)
+    with _lock:
+        shutil.rmtree(d)
+    return not d.exists()

@@ -3,6 +3,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const main = $("#main");
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const TYPES = {heading:"Título",paragraph:"Parágrafo",list_item:"Item de lista",quote:"Citação",note:"Nota",reference:"Referência"};
+const SEVL = {info: "Informativo", aviso: "Decisão editorial", bloqueador: "Bloqueador"};
+const sev = f => f.severity || ({glossario_ok: "info", referencia: "info", residuo: "bloqueador", perda: "bloqueador"})[f.kind] || "aviso";
 const STYLES = [["fiel","Fiel ao original","Segue de perto as frases e a forma do texto."],
   ["natural","Natural no idioma de destino","Mantém sentido e voz, com leitura fluente. (Recomendado)"],
   ["local","Adaptado ao público local","Ajusta referências culturais quando necessário, sempre sinalizando."]];
@@ -50,9 +52,26 @@ async function home() {
   <p><button class="primary big" id="new">Criar adaptação</button></p>
   <section class="card" aria-labelledby="h-proj"><h2 id="h-proj">Projetos salvos</h2>
   ${projects.length ? `<ul class="list">${projects.map(p => `<li><span><b>${esc(p.name)}</b><br><small>${esc(p.tgt || "idioma não definido")} · ${p.progress} trechos adaptados · ${new Date(p.updated*1000).toLocaleString("pt-BR")}</small></span>
-    <a class="btn" href="#/p/${p.id}/${p.step || 2}">Retomar</a></li>`).join("")}</ul>` : `<p>Nenhum projeto ainda.</p>`}</section>`;
+    <span class="act"><a class="btn" href="#/p/${p.id}/${p.step || 2}">Retomar</a> <button type="button" class="danger" data-del="${p.id}" data-name="${esc(p.name)}">Excluir</button></span></li>`).join("")}</ul>` : `<p>Nenhum projeto ainda.</p>`}</section>`;
   $("#new").onclick = () => go("#/novo");
+  main.querySelectorAll("[data-del]").forEach(b => b.onclick = () => askDelete(b.dataset.del, b.dataset.name));
   focusMain();
+}
+
+function askDelete(id, name) {
+  const dlg = document.createElement("dialog");
+  dlg.setAttribute("aria-labelledby", "dlg-t");
+  dlg.innerHTML = `<form method="dialog"><h2 id="dlg-t">Excluir “${esc(name)}”?</h2>
+   <p>Isso apaga <b>definitivamente</b> deste computador: o projeto, a cópia do manuscrito enviada, a adaptação, o glossário e as exportações salvas. Não dá para desfazer.</p>
+   <label for="dlg-n">Para confirmar, digite o nome do projeto: <b>${esc(name)}</b></label><input type="text" id="dlg-n" autocomplete="off">
+   <p id="dlg-m" aria-live="polite"></p>
+   <div class="actions"><button value="cancel">Cancelar</button><button type="button" class="danger" id="dlg-ok">Excluir definitivamente</button></div></form>`;
+  document.body.append(dlg); dlg.showModal(); $("#dlg-n", dlg).focus();
+  dlg.addEventListener("close", () => dlg.remove());
+  $("#dlg-ok", dlg).onclick = async () => {
+    try { await api("/api/projects/" + id, json("DELETE", {confirm_name: $("#dlg-n", dlg).value})); dlg.close(); toast("Projeto excluído"); home(); }
+    catch (e) { $("#dlg-m", dlg).innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+  };
 }
 
 function step1() {
@@ -86,7 +105,8 @@ function step1view() {
   setSteps(1);
   main.innerHTML = `<h1>1. Manuscrito carregado</h1>
   <p><b>${esc(P.name)}</b> — ${esc(P.source_kind)}. Encontramos ${P.blocks.length} trechos: ${counts(P)}. Seções: ${P.sections.length}.</p>
-  ${P.warnings.map(w => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}
+  ${P.warnings.filter(w => !w.startsWith("Não importado")).map(w => `<p class="warn">⚠ ${esc(w)}</p>`).join("")}
+  ${P.warnings.some(w => w.startsWith("Não importado")) ? `<div class="warn"><b>Detectado no arquivo e NÃO importado</b> (não aparecerá na adaptação nem na exportação):<ul>${P.warnings.filter(w => w.startsWith("Não importado")).map(w => `<li>${esc(w.replace(/^Não importado: /, ""))}</li>`).join("")}</ul></div>` : ""}
   <details class="card"><summary>Ver a estrutura detectada</summary><ol>${P.blocks.map(b => `<li><span class="kind">${TYPES[b.type]}</span> ${esc(b.text.slice(0, 120))}</li>`).join("")}</ol></details>
   <div class="actions"><a class="btn" href="#/">Início</a><a class="btn primary" href="#/p/${P.id}/2">Continuar para idiomas</a></div>`;
   focusMain();
@@ -167,18 +187,18 @@ function jobBox() {
   const j = P.job || {};
   if (j.state === "running") return `<div class="card"><p>Adaptando com ${esc(j.provider)}… parte ${j.done} de ${j.total}. Você pode sair; o progresso fica salvo.</p><progress max="${j.total}" value="${j.done}"></progress></div>`;
   if (j.state === "blocked") return setupHelp(j.status);
-  if (j.state === "error") return `<p class="err"><b>${({chave:"Chave de acesso",indisponivel:"Serviço indisponível",limite:"Limite de uso",geracao:"Erro de geração"})[j.kind] || "Erro"}:</b> ${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
+  if (j.state === "error") return `<p class="err"><b>${({chave:"Chave de acesso",indisponivel:"Serviço indisponível",limite:"Limite de uso",geracao:"Erro de geração",modelo:"Modelo indisponível"})[j.kind] || "Erro"}:</b> ${esc(j.message)} <button id="retry">Continuar adaptação</button></p>`;
   if (j.state === "done") return (j.notes || []).map(n => `<p class="warn">⚠ ${esc(n)}</p>`).join("") + `<p class="hint">Gerado por: ${esc(j.provider)}</p>`;
   return "";
 }
 
 async function step4() {
   setSteps(4);
-  const ad = P.adaptation, flagged = P.blocks.filter(b => (ad[b.id]?.flags || []).some(f => !f.resolved)).length;
+  const ad = P.adaptation, flagged = P.blocks.filter(b => (ad[b.id]?.flags || []).some(f => !f.resolved && sev(f) !== "info")).length;
   const done = P.blocks.filter(b => ad[b.id]).length;
-  main.innerHTML = `<h1>4. Revisar</h1><p>${done} de ${P.blocks.length} trechos adaptados · <b>${flagged}</b> com pontos para decidir. Edite à direita; tudo é salvo automaticamente.</p>
+  main.innerHTML = `<h1>4. Revisar</h1><p>${done} de ${P.blocks.length} trechos adaptados · <b>${flagged}</b> com pontos para decidir. Edite à direita; tudo é salvo automaticamente. Nenhum trecho é aprovado automaticamente.</p>
   <div id="job">${jobBox()}</div>
-  <div class="review"><nav class="toc" aria-label="Seções">${P.sections.map((s, i) => { const n = s.blocks.filter(id => (ad[id]?.flags || []).some(f => !f.resolved)).length; return `<button data-s="${i}" ${i === curSec ? 'aria-current="true"' : ""}>${esc(s.title.slice(0, 60))}${n ? ` <span class="badge" aria-label="${n} pendentes">${n}</span>` : ""}</button>`; }).join("")}</nav>
+  <div class="review"><nav class="toc" aria-label="Seções">${P.sections.map((s, i) => { const n = s.blocks.filter(id => (ad[id]?.flags || []).some(f => !f.resolved && sev(f) !== "info")).length; return `<button data-s="${i}" ${i === curSec ? 'aria-current="true"' : ""}>${esc(s.title.slice(0, 60))}${n ? ` <span class="badge" aria-label="${n} pendentes">${n}</span>` : ""}</button>`; }).join("")}</nav>
   <section id="sec" aria-live="polite"></section></div>
   <div class="actions"><a class="btn" href="#/p/${P.id}/3">Voltar ao estilo</a><a class="btn primary" href="#/p/${P.id}/5">Continuar para exportar</a></div>`;
   $(".toc").onclick = e => { const b = e.target.closest("button"); if (!b) return; curSec = +b.dataset.s; $(".toc").querySelectorAll("button").forEach(x => x.removeAttribute("aria-current")); b.setAttribute("aria-current", "true"); drawSec(); $("#sec h2").focus(); };
@@ -195,22 +215,33 @@ function drawSec() {
     s.blocks.map(id => { const b = byId[id], a = P.adaptation[id];
       return `<div class="pair"><div class="orig"><span class="kind">${TYPES[b.type]}</span>\n${esc(b.text)}</div><div>
       ${a ? `<label class="kind" for="t-${id}">Adaptação — ${TYPES[b.type]}${a.edited ? " · editado" : ""}</label><textarea id="t-${id}" data-id="${id}">${esc(a.text)}</textarea>
-      ${(a.flags || []).map((f, n) => `<div class="flag ${f.resolved ? "resolved" : ""}"><span>⚑ ${esc(f.msg)}</span>${f.resolved ? "" : `<button data-r="${id}:${n}">Decidido</button>`}</div>`).join("")}` : `<p class="hint">Ainda não adaptado.</p>`}</div></div>`; }).join("");
-  $("#sec").oninput = e => { const id = e.target.dataset.id; if (!id) return; clearTimeout(e.target._t); e.target._t = setTimeout(async () => { P.adaptation[id] = await api(`/api/projects/${P.id}/blocks/${id}`, json("PUT", {text: e.target.value})); toast("Salvo"); }, 600); };
-  $("#sec").onclick = async e => { const r = e.target.dataset.r; if (!r) return; const [id, n] = r.split(":"); await api(`/api/projects/${P.id}/blocks/${id}/flags/${n}/resolve`, {method: "POST"}); P.adaptation[id].flags[n].resolved = true; drawSec(); };
+      ${(a.flags || []).map((f, n) => { const sv = sev(f); return `<div class="flag sev-${sv} ${f.resolved ? "resolved" : ""}"><span><b>${SEVL[sv]}:</b> ${esc(f.msg)}${f.decision ? ` <i>— decisão: ${esc(f.decision)}</i>` : ""}</span>${f.resolved || sv === "info" ? "" : sv === "bloqueador" ? `<span class="dec"><label class="sr" for="d-${id}-${n}">Decisão editorial</label><input type="text" id="d-${id}-${n}" placeholder="Decisão (ex.: manter de propósito)"><button data-r="${id}:${n}">Registrar</button></span>` : `<button data-r="${id}:${n}">Decidido</button>`}</div>`; }).join("")}` : `<p class="hint">Ainda não adaptado.</p>`}</div></div>`; }).join("");
+  $("#sec").oninput = e => { const id = e.target.dataset.id; if (!id) return; clearTimeout(e.target._t); e.target._t = setTimeout(async () => { const before = (P.adaptation[id].flags || []).length; P.adaptation[id] = await api(`/api/projects/${P.id}/blocks/${id}`, json("PUT", {text: e.target.value})); toast("Salvo"); if ((P.adaptation[id].flags || []).length !== before) { const pos = e.target.selectionStart; drawSec(); const t = $(`#t-${id}`); t.focus(); t.setSelectionRange(pos, pos); } }, 800); };
+  $("#sec").onclick = async e => { const r = e.target.dataset.r; if (!r) return; const [id, n] = r.split(":"); const inp = $(`#d-${id}-${n}`);
+    try { await api(`/api/projects/${P.id}/blocks/${id}/flags/${n}/resolve`, json("POST", {decision: inp ? inp.value : ""})); } catch (err) { toast(err.message); inp?.focus(); return; } P.adaptation[id].flags[n].resolved = true; drawSec(); };
 }
 
-function step5() {
+async function step5() {
   setSteps(5);
-  const miss = P.blocks.filter(b => !P.adaptation[b.id]).length;
-  const open = P.blocks.filter(b => (P.adaptation[b.id]?.flags || []).some(f => !f.resolved)).length;
+  const I = await api(`/api/projects/${P.id}/issues`);
+  const li = x => `<li><a href="#/p/${P.id}/4" data-b="${x.block}">${esc(x.excerpt)}…</a> — ${esc(x.msg)}</li>`;
+  const blocked = I.missing.length || I.blockers.length;
   main.innerHTML = `<h1>5. Exportar</h1>
-  ${miss ? `<p class="err">Ainda há ${miss} trecho(s) sem adaptação. Volte à revisão e conclua a adaptação antes de exportar.</p>` : `<p class="okbox">Adaptação completa: ${P.blocks.length} trechos.</p>`}
-  ${open ? `<p class="warn">⚠ ${open} trecho(s) ainda têm pontos sinalizados sem decisão. Você pode exportar assim mesmo, mas recomendamos revisar.</p>` : ""}
+  ${I.missing.length ? `<p class="err">Ainda há ${I.missing.length} trecho(s) sem adaptação. Volte à revisão e conclua a adaptação.</p>` : ""}
+  ${I.blockers.length ? `<div class="err"><b>${I.blockers.length} bloqueador(es)</b> impedem a exportação até serem resolvidos (corrija o texto ou registre a decisão):<ul>${I.blockers.map(li).join("")}</ul></div>` : ""}
+  ${I.warnings.length ? `<div class="warn"><b>${I.warnings.length} aviso(s) sem decisão editorial:</b><ul>${I.warnings.map(li).join("")}</ul></div>` : ""}
+  ${!blocked && !I.warnings.length ? `<p class="okbox">Sem pendências automáticas. Lembre: isso não é uma aprovação — a revisão final é sua.</p>` : ""}
   <div class="card"><p>O arquivo exportado contém só a versão adaptada e revisada. O original fica intacto.</p>
-  <div class="actions" style="justify-content:flex-start"><a class="btn primary" ${miss ? 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"' : `href="/api/projects/${P.id}/export.docx"`}>Baixar Word (.docx)</a>
-  <a class="btn" ${miss ? 'aria-disabled="true" tabindex="-1" style="opacity:.5;pointer-events:none"' : `href="/api/projects/${P.id}/export.md"`}>Baixar Markdown (.md)</a></div></div>
+  ${!blocked && I.warnings.length ? `<label><input type="checkbox" id="conf"> Revisei os avisos acima e quero exportar mesmo assim.</label>` : ""}
+  <div class="actions" style="justify-content:flex-start"><button class="primary" data-f="docx" ${blocked ? "disabled" : ""}>Baixar Word (.docx)</button>
+  <button data-f="md" ${blocked ? "disabled" : ""}>Baixar Markdown (.md)</button></div><p id="em" aria-live="polite"></p></div>
   <div class="actions"><a class="btn" href="#/p/${P.id}/4">Voltar à revisão</a><a class="btn" href="#/">Início</a></div>`;
+  main.querySelectorAll("[data-b]").forEach(a => a.onclick = () => { curSec = P.sections.findIndex(s => s.blocks.includes(a.dataset.b)); });
+  main.querySelectorAll("[data-f]").forEach(b => b.onclick = () => {
+    const c = $("#conf");
+    if (c && !c.checked) { $("#em").innerHTML = `<span class="err">Marque a confirmação para exportar com avisos pendentes.</span>`; c.focus(); return; }
+    location.href = `/api/projects/${P.id}/export.${b.dataset.f}${c ? "?confirm=true" : ""}`;
+  });
   focusMain();
 }
 

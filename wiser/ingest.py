@@ -169,39 +169,136 @@ def _pdf(data: bytes):
     return parse_plain(text), warnings
 
 
+W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _numfmt(d):
+    """numId -> {ilvl: numFmt} a partir de numbering.xml."""
+    try:
+        root = d.part.numbering_part.element
+    except (KeyError, AttributeError, NotImplementedError):
+        return {}
+    absf = {}
+    for an in root.findall(W + "abstractNum"):
+        lv = {}
+        for l in an.findall(W + "lvl"):
+            f = l.find(W + "numFmt")
+            lv[int(l.get(W + "ilvl"))] = f.get(W + "val") if f is not None else "decimal"
+        absf[an.get(W + "abstractNumId")] = lv
+    out = {}
+    for n in root.findall(W + "num"):
+        ref = n.find(W + "abstractNumId")
+        out[n.get(W + "numId")] = absf.get(ref.get(W + "val") if ref is not None else "", {})
+    return out
+
+
+def _roman(n):
+    vals = [(1000, "m"), (900, "cm"), (500, "d"), (400, "cd"), (100, "c"), (90, "xc"), (50, "l"), (40, "xl"), (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i")]
+    r = ""
+    for v, sym in vals:
+        while n >= v:
+            r += sym; n -= v
+    return r
+
+
+def _marker(fmt, n):
+    if fmt == "bullet" or fmt == "none":
+        return "-"
+    if fmt in ("lowerLetter", "upperLetter"):
+        c = chr(ord("a") + (n - 1) % 26)
+        return (c.upper() if fmt == "upperLetter" else c) + ")"
+    if fmt in ("lowerRoman", "upperRoman"):
+        r = _roman(n)
+        return (r.upper() if fmt == "upperRoman" else r) + "."
+    return f"{n}."
+
+
 def _docx(data: bytes):
+    """Importa DOCX preservando numeração e marcadores de listas (como texto literal)
+    e lista explicitamente o que foi detectado e NÃO importado."""
     import docx
     try:
         d = docx.Document(io.BytesIO(data))
     except Exception as e:
         raise IngestError(f"Não foi possível abrir o DOCX: {e}")
+    fmts = _numfmt(d)
+    counters: dict = {}
     warnings, blocks = [], []
     for p in d.paragraphs:
         st = (p.style.name or "").lower() if p.style is not None else ""
         t = p.text.strip()
         if not t:
             continue
+        ppr = p._p.pPr
+        num = ppr.numPr if ppr is not None else None
+        nid = num.numId.val if num is not None and num.numId is not None else None
+        if nid is None and p.style is not None and p.style.element.pPr is not None and p.style.element.pPr.numPr is not None:
+            sn = p.style.element.pPr.numPr
+            nid = sn.numId.val if sn.numId is not None else None
+            lvl = sn.ilvl.val if sn.ilvl is not None else 0
+        else:
+            lvl = num.ilvl.val if num is not None and num.ilvl is not None else 0
+        if nid not in (None, 0) and str(nid) in fmts or (nid not in (None, 0) and "list" in st):
+            fmt = fmts.get(str(nid), {}).get(lvl, "bullet" if "bullet" in st else "decimal")
+            key = (str(nid), lvl)
+            for k in [k for k in counters if k[0] == str(nid) and k[1] > lvl]:
+                del counters[k]
+            counters[key] = counters.get(key, 0) + 1
+            m = _marker(fmt, counters[key])
+            b = _b("list_item", f"{m} {t}", lvl)
+            b["list"] = {"kind": "bullet" if m == "-" else "number", "marker": m, "level": lvl}
+            blocks.append(b); continue
         if st == "title":
             blocks.append(_b("heading", t, 1))
         elif st.startswith("heading"):
             lv = re.findall(r"\d", st)
             blocks.append(_b("heading", t, min(int(lv[0]) + 1 if lv else 2, 6)))
-        elif "list" in st:
-            blocks.append(_b("list_item", t))
+        elif "list bullet" in st:
+            b = _b("list_item", "- " + t); b["list"] = {"kind": "bullet", "marker": "-", "level": 0}; blocks.append(b)
+        elif "list number" in st:
+            counters[("style", 0)] = counters.get(("style", 0), 0) + 1
+            m = f"{counters[('style', 0)]}."
+            b = _b("list_item", f"{m} {t}"); b["list"] = {"kind": "number", "marker": m, "level": 0}; blocks.append(b)
         elif "quote" in st or "citação" in st:
             blocks.append(_b("quote", t))
         else:
             blocks.append(_b("paragraph", t))
-    if d.tables:
-        warnings.append(f"O documento tem {len(d.tables)} tabela(s); o conteúdo de tabelas não foi importado.")
-    if d.inline_shapes:
-        warnings.append("O documento tem imagens; texto dentro de imagens não é extraído.")
+    body = d.element.body
     xml = d.element.xml
-    if "w:footnoteReference" in xml:
-        warnings.append("Há notas de rodapé no DOCX; o texto delas não foi importado nesta versão.")
-    if "w:txbxContent" in xml:
-        warnings.append("Há caixas de texto no DOCX; elas podem não ter sido importadas.")
-    return _finish(blocks), warnings
+    unsupported = []
+    for i, tb in enumerate(d.tables, 1):
+        first = ""
+        try:
+            first = next((c.text.strip() for r in tb.rows for c in r.cells if c.text.strip()), "")
+        except Exception:
+            pass
+        unsupported.append(f"Tabela {i} ({len(tb.rows)} linha(s){', começa com: “' + first[:40] + '”' if first else ''})")
+    nfoot = xml.count("<w:footnoteReference")
+    if nfoot:
+        unsupported.append(f"{nfoot} nota(s) de rodapé")
+    nend = xml.count("<w:endnoteReference")
+    if nend:
+        unsupported.append(f"{nend} nota(s) de fim")
+    ntx = xml.count("<w:txbxContent")
+    if ntx:
+        unsupported.append(f"{ntx} caixa(s) de texto")
+    nimg = len(d.inline_shapes) + xml.count("<wp:anchor")
+    if nimg:
+        unsupported.append(f"{nimg} imagem(ns)/forma(s) (texto dentro de imagens não é extraído)")
+    ncom = xml.count("<w:commentReference")
+    if ncom:
+        unsupported.append(f"{ncom} comentário(s)")
+    if "<m:oMath" in xml:
+        unsupported.append(f"{xml.count('<m:oMath ') + xml.count('<m:oMath>')} equação(ões)")
+    try:
+        hf = sum(1 for s_ in d.sections for h in (s_.header, s_.footer) if not h.is_linked_to_previous and any(p.text.strip() for p in h.paragraphs))
+    except Exception:
+        hf = 0
+    if hf:
+        unsupported.append(f"{hf} cabeçalho(s)/rodapé(s) de página")
+    for u in unsupported:
+        warnings.append("Não importado: " + u + ".")
+    return _finish(blocks), warnings, unsupported
 
 
 def ingest(filename: str | None, data: bytes | None = None, text: str | None = None):
@@ -221,7 +318,7 @@ def ingest(filename: str | None, data: bytes | None = None, text: str | None = N
     if ext == ".pdf":
         b, w = _pdf(data)
     elif ext == ".docx":
-        b, w = _docx(data)
+        b, w, _ = _docx(data)
     else:
         try:
             s = data.decode("utf-8")

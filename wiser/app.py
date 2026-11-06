@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import export, store
+from . import export, review, store
 from .ingest import ACCEPTED, IngestError, ingest, sections
 from .providers import ProviderError, ProviderUnavailable, chunk, get_provider, lang_code
 
@@ -150,8 +150,9 @@ def _run(pid):
         for i, part in enumerate(parts):
             res = prov.translate_chunk(part, ctx)
             p = store.load(pid)
+            byid = {b["id"]: b for b in p["blocks"]}
             for r in res:  # mesma ordem e ids dos blocos originais
-                p["adaptation"][r["id"]] = {"text": r["text"], "flags": r["flags"], "edited": False, "provider": prov.name}
+                p["adaptation"][r["id"]] = review.recheck(byid[r["id"]], {"text": r["text"], "flags": r["flags"], "edited": False, "provider": prov.name}, src, tgt)
             p["job"]["done"] = i + 1
             store.save(p)
         p = store.load(pid)
@@ -197,27 +198,62 @@ def edit(pid: str, bid: str, body: Edit):
         raise HTTPException(404, "Trecho não encontrado.")
     a = p["adaptation"].setdefault(bid, {"flags": [], "provider": "manual"})
     a["text"], a["edited"] = body.text, True
+    b = next(b for b in p["blocks"] if b["id"] == bid)
+    review.recheck(b, a, lang_code(p["settings"]["src"]), lang_code(p["settings"].get("tgt", "")))
     store.save(p)
     return a
 
 
+class Decision(BaseModel):
+    decision: str = ""
+
+
 @app.post("/api/projects/{pid}/blocks/{bid}/flags/{n}/resolve")
-def resolve(pid: str, bid: str, n: int):
+def resolve(pid: str, bid: str, n: int, body: Decision | None = None):
     p = _get(pid)
     try:
-        p["adaptation"][bid]["flags"][n]["resolved"] = True
+        f = p["adaptation"][bid]["flags"][n]
     except (KeyError, IndexError):
         raise HTTPException(404, "Sinalização não encontrada.")
+    dec = (body.decision if body else "").strip()
+    if review.severity(f) == "bloqueador" and not dec:
+        raise HTTPException(400, "Este problema bloqueia a exportação: corrija o texto ou registre a decisão editorial (ex.: manter em português de propósito).")
+    f["resolved"], f["decision"], f["resolved_at"] = True, dec[:500], time.time()
     store.save(p)
     return {"ok": True}
 
 
-@app.get("/api/projects/{pid}/export.{fmt}")
-def do_export(pid: str, fmt: str):
+@app.get("/api/projects/{pid}/issues")
+def get_issues(pid: str):
+    return review.issues(_get(pid), lang_code)
+
+
+class Delete(BaseModel):
+    confirm_name: str
+
+
+@app.delete("/api/projects/{pid}")
+def delete(pid: str, body: Delete):
     p = _get(pid)
-    miss = export.missing(p)
-    if miss:
-        raise HTTPException(409, f"Ainda há {len(miss)} trecho(s) sem adaptação. Conclua antes de exportar.")
+    if body.confirm_name.strip() != p["name"].strip():
+        raise HTTPException(400, "Para excluir, digite exatamente o nome do projeto.")
+    t = _jobs.get(pid)
+    if t and t.is_alive():
+        raise HTTPException(409, "A adaptação ainda está em andamento. Espere terminar para excluir.")
+    store.delete(pid); _jobs.pop(pid, None)
+    return {"deleted": pid}
+
+
+@app.get("/api/projects/{pid}/export.{fmt}")
+def do_export(pid: str, fmt: str, confirm: bool = False):
+    p = _get(pid)
+    iss = review.issues(p, lang_code)
+    if iss["missing"]:
+        raise HTTPException(409, f"Ainda há {len(iss['missing'])} trecho(s) sem adaptação. Conclua antes de exportar.")
+    if iss["blockers"]:
+        raise HTTPException(409, f"Há {len(iss['blockers'])} problema(s) bloqueador(es) sem resolução. Resolva-os na revisão.")
+    if iss["warnings"] and not confirm:
+        raise HTTPException(409, f"Há {len(iss['warnings'])} aviso(s) sem decisão. Confirme explicitamente para exportar assim mesmo.")
     base = re.sub(r"[^\w\-]+", "_", p["name"])[:60] or "wiser"
     if fmt == "md":
         data, mt = export.to_markdown(p).encode("utf-8"), "text/markdown; charset=utf-8"
